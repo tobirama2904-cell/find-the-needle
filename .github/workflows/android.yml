@@ -1,0 +1,96 @@
+name: android-apk
+
+# Сборка APK на бесплатных раннерах GitHub: публичный репозиторий => минуты не ограничены.
+# Ничего платного: Godot (MIT) + Android SDK раннера + отладочный ключ.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: 4.7.2-stable
+  GODOT_URL: https://github.com/godotengine/godot/releases/download/4.7.2-stable
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Godot + шаблоны экспорта
+        run: |
+          set -e
+          cd /tmp
+          curl -sSL -o godot.zip "$GODOT_URL/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip -q godot.zip
+          mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+          curl -sSL -o templates.tpz "$GODOT_URL/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          mkdir -p ~/.local/share/godot/export_templates
+          unzip -q templates.tpz -d /tmp/tpl
+          mv /tmp/tpl/templates ~/.local/share/godot/export_templates/4.7.2.stable
+          godot --headless --version
+
+      - name: Android SDK
+        run: |
+          set -e
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;34.0.0" "platforms;android-34" >/dev/null
+
+      - name: Импорт ресурсов и настройка ключа
+        run: |
+          godot --headless --path . --import || true
+          mkdir -p ~/.config/godot
+          cat > ~/.config/godot/editor_settings-4.tres <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_SDK_ROOT"
+          export/android/debug_keystore = "$HOME/.config/godot/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          EOF
+          if [ ! -f "$HOME/.config/godot/debug.keystore" ]; then
+            keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
+              -keystore "$HOME/.config/godot/debug.keystore" -storepass android \
+              -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          fi
+
+      - name: Экспорт APK
+        run: |
+          set -e
+          mkdir -p build
+          godot --headless --path . --export-debug "Android" build/find-the-needle.apk
+          ls -la build/
+
+      - name: Артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: find-the-needle-apk
+          path: build/find-the-needle.apk
+          retention-days: 90
+
+      - name: Публикация релиза (прямая ссылка для телефона)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="build-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" build/find-the-needle.apk \
+            --title "Найди иголку — сборка $(date +%d.%m.%Y %H:%M)" \
+            --notes "Свежий APK (отладочная подпись). Скачай файл find-the-needle.apk на телефон и установи (разрешить установку из неизвестных источников)." \
+            --prerelease
+          echo "### APK: https://github.com/${{ github.repository }}/releases/download/$TAG/find-the-needle.apk" >> $GITHUB_STEP_SUMMARY
